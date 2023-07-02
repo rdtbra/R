@@ -22,6 +22,7 @@ int Rf_initialize_R(int ac, char **av); /* in ../unix/system.c */
 
 #include <Rinterface.h>
 
+/* RDT: 20230702 - Ponto de entrada. */
 int main(int ac, char **av)
 {
     R_running_as_main_program = 1;
