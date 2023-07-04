@@ -186,368 +186,408 @@ static char* unescape_arg(char *p, char* avp) {
 
 extern int R_isWriteableDir(char *path);
 
+/* RDT: 20230703 - Inicialização do ambiente do sistema R */
 int Rf_initialize_R(int ac, char **av)
 {
-    int i, ioff = 1, j;
-    Rboolean useX11 = TRUE, useTk = FALSE;
-    char *p, msg[1024], cmdlines[10000], **avv;
-    structRstart rstart;
-    Rstart Rp = &rstart;
-    Rboolean force_interactive = FALSE;
+  int i, ioff = 1, j;
+  Rboolean useX11 = TRUE, useTk = FALSE;
+  char *p, msg[1024], cmdlines[10000], **avv;
+  structRstart rstart;
+  Rstart Rp = &rstart;
+  Rboolean force_interactive = FALSE;
 
-    if (num_initialized++) {
-	fprintf(stderr, "%s", "R is already initialized\n");
-	exit(1);
-    }
-
+  if (num_initialized++) {
+    fprintf(stderr, "%s", "R is already initialized\n");
+    exit(1);
+  }
 
 #if defined(HAVE_SYS_RESOURCE_H) && defined(HAVE_GETRLIMIT)
 {
-    /* getrlimit is POSIX:
-       https://pubs.opengroup.org/onlinepubs/9699919799/functions/getrlimit.html
-    */
-    struct rlimit rlim;
+  /* getrlimit is POSIX:
+     https://pubs.opengroup.org/onlinepubs/9699919799/functions/getrlimit.html
+   */
+  struct rlimit rlim;
 
-    R_CStackDir = C_STACK_DIRECTION;
+  R_CStackDir = C_STACK_DIRECTION;
     
+  if (getrlimit(RLIMIT_STACK, &rlim) == 0) {
+	  
+    /* 'unlimited' is represented by RLIM_INFINITY, which is a
+       very large (but maybe not the largest) representable value.
 
-    if(getrlimit(RLIMIT_STACK, &rlim) == 0) {
-	/* 'unlimited' is represented by RLIM_INFINITY, which is a
-	   very large (but maybe not the largest) representable value.
+       The standard allows the values RLIM_SAVED_CUR and
+       RLIB_SAVED_MAX, apparently used on 32-bit AIX.  
+       (http://www.ibm.com/support/knowledgecenter/ssw_aix_61/com.ibm.aix.basetrf1/getrlimit_64.htm)
 
-	   The standard allows the values RLIM_SAVED_CUR and
-	   RLIB_SAVED_MAX, apparently used on 32-bit AIX.  
-	   (http://www.ibm.com/support/knowledgecenter/ssw_aix_61/com.ibm.aix.basetrf1/getrlimit_64.htm)
+       These may or may not be different from RLIM_INFINITY (they
+       are the same on Linux and macOS but not Solaris where they
+       are larger).  We will assume that unrepresentable limits
+       are very large.
 
-	   These may or may not be different from RLIM_INFINITY (they
-	   are the same on Linux and macOS but not Solaris where they
-	   are larger).  We will assume that unrepresentable limits
-	   are very large.
-
-	   This is cautious: it is extremely unlikely that the soft
-	   limit is either unlimited or unrepresentable.
-	*/
-	rlim_t lim = rlim.rlim_cur;
+       This is cautious: it is extremely unlikely that the soft
+       limit is either unlimited or unrepresentable.
+    */
+	  
+    rlim_t lim = rlim.rlim_cur;
+	  
 #if defined(RLIM_SAVED_CUR) && defined(RLIM_SAVED_MAX)
-	if (lim == RLIM_SAVED_CUR || lim == RLIM_SAVED_MAX) 
-	    lim = RLIM_INFINITY;
+    if (lim == RLIM_SAVED_CUR || lim == RLIM_SAVED_MAX) 
+      lim = RLIM_INFINITY;
 #endif
-	if (lim != RLIM_INFINITY) R_CStackLimit = (uintptr_t) lim;
-    }
-#if defined(HAVE_LIBC_STACK_END)
-    {
-	R_CStackStart = (uintptr_t) __libc_stack_end;
-	/* The libc stack end is not exactly at the stack start, so one
-	   cannot access __libc_stack_end - R_CStackLimit/getrlimit + 1. We
-	   have to find the real stack start that matches getrlimit.
-
-	   A modern alternative to __libc_stack_end and to parsing /proc/maps
-	   directly is pthread_getattr_np; it doesn't provide the exact stack
-	   start, either, but provides a matching stack size smaller than 
-	   the one obtained from getrlimit. However, pthread_getattr_np
-	   may have not worked properly on old Linux distributions. */
+	  
+    if (lim != RLIM_INFINITY) R_CStackLimit = (uintptr_t) lim;
+  }
 	
-	/* based on GDB relocatable.c */
-	FILE *f;
-	f = fopen("/proc/self/maps", "r");
-	if (f) {
-	    for(;;) {
-		int c;
-		unsigned long start, end;
+#if defined(HAVE_LIBC_STACK_END)
+  {
+    R_CStackStart = (uintptr_t) __libc_stack_end;
+    /* The libc stack end is not exactly at the stack start, so one
+       cannot access __libc_stack_end - R_CStackLimit/getrlimit + 1. We
+       have to find the real stack start that matches getrlimit.
 
-		if (fscanf(f, "%lx-%lx", &start, &end) == 2 &&
-		    R_CStackStart >= (uintptr_t)start &&
-		    R_CStackStart < (uintptr_t)end) {
+       A modern alternative to __libc_stack_end and to parsing /proc/maps
+       directly is pthread_getattr_np; it doesn't provide the exact stack
+       start, either, but provides a matching stack size smaller than 
+       the one obtained from getrlimit. However, pthread_getattr_np
+       may have not worked properly on old Linux distributions. */
+	
+    /* based on GDB relocatable.c */
+    FILE *f;
+    f = fopen("/proc/self/maps", "r");
+	  
+    if (f) {
+	    
+      for(;;) {
+	      
+        int c;
+        unsigned long start, end;
+
+        if (fscanf(f, "%lx-%lx", &start, &end) == 2 &&
+          R_CStackStart >= (uintptr_t)start &&
+          R_CStackStart < (uintptr_t)end) {
 		    
-		    /* would this be ok for R_CStackDir == -1? */
-		    R_CStackStart = (uintptr_t) ((R_CStackDir == 1) ? end : start);
-		    break;
-		}
-		for(c = getc(f); c != '\n' && c != EOF; c = getc(f));
-		if (c == EOF) {
-		    /* could also abort here, but R will usually work with
-		       R_CStackStart set just for __libc_stack_end */
-		    fprintf(stderr, "WARNING: Error parsing /proc/self/maps!\n");
-		    break;
-		}
-	    }
-	    fclose(f);
+          /* would this be ok for R_CStackDir == -1? */
+	  R_CStackStart = (uintptr_t) ((R_CStackDir == 1) ? end : start);
+          break;
 	}
+	      
+        for (c = getc(f); c != '\n' && c != EOF; c = getc(f));
+          if (c == EOF) {
+		  
+	    /* could also abort here, but R will usually work with
+            R_CStackStart set just for __libc_stack_end */
+            fprintf(stderr, "WARNING: Error parsing /proc/self/maps!\n");
+            break;
+		  
+	  }
+      }
+      fclose(f);
     }
+  }
 #elif defined(HAVE_KERN_USRSTACK)
-    {
-	/* Borrowed from mzscheme/gc/os_dep.c */
-	int nm[2] = {CTL_KERN, KERN_USRSTACK};
-	void * base;
-	size_t len = sizeof(void *);
-	(void) sysctl(nm, 2, &base, &len, NULL, 0);
-	R_CStackStart = (uintptr_t) base;
-    }
+  {
+    /* Borrowed from mzscheme/gc/os_dep.c */
+    int nm[2] = {CTL_KERN, KERN_USRSTACK};
+    void * base;
+    size_t len = sizeof(void *);
+    (void) sysctl(nm, 2, &base, &len, NULL, 0);
+    R_CStackStart = (uintptr_t) base;
+  }
 #elif defined(HAVE_THR_STKSEGMENT)
-    {
-	/* Solaris */
-	stack_t stack;
-	if (thr_stksegment(&stack))
-	    R_Suicide("Cannot obtain stack information (thr_stksegment).");
-	R_CStackStart = (uintptr_t) stack.ss_sp;
-	/* This _may_ have to be adjusted for a (perhaps theoretical) platform
-	   where the stack would grow upwards.
+  {
+    /* Solaris */
+    stack_t stack;
+    if (thr_stksegment(&stack))
+      R_Suicide("Cannot obtain stack information (thr_stksegment).");
+      R_CStackStart = (uintptr_t) stack.ss_sp;
+	  
+      /* This _may_ have to be adjusted for a (perhaps theoretical) platform
+         where the stack would grow upwards.
 
-	   The stack size could be updated based on stack.ss_size, but experiments
-	   suggest getrlimit is safe here. */
-    }
+        The stack size could be updated based on stack.ss_size, but experiments
+        suggest getrlimit is safe here. */
+  }
 #else
-    if(R_running_as_main_program) {
-	/* This is not the main program, but unless embedded it is
-	   near the top, 5540 bytes away when checked. */
-	R_CStackStart = (uintptr_t) &i + (6000 * R_CStackDir);
-    }
+  if (R_running_as_main_program) {
+    /* This is not the main program, but unless embedded it is
+       near the top, 5540 bytes away when checked. */
+    R_CStackStart = (uintptr_t) &i + (6000 * R_CStackDir);
+  }
 #endif
-    if(R_CStackStart == (uintptr_t)(-1)) R_CStackLimit = (uintptr_t)(-1); /* never set */
-
+  if (R_CStackStart == (uintptr_t)(-1)) R_CStackLimit = (uintptr_t)(-1); /* never set */
     /* setup_Rmainloop includes (disabled) code to test stack detection */
-}
+  }
 #endif
 
-    ptr_R_Suicide = Rstd_Suicide;
-    ptr_R_ShowMessage = Rstd_ShowMessage;
-    ptr_R_ReadConsole = Rstd_ReadConsole;
-    ptr_R_WriteConsole = Rstd_WriteConsole;
-    ptr_R_ResetConsole = Rstd_ResetConsole;
-    ptr_R_FlushConsole = Rstd_FlushConsole;
-    ptr_R_ClearerrConsole = Rstd_ClearerrConsole;
-    ptr_R_Busy = Rstd_Busy;
-    ptr_R_CleanUp = Rstd_CleanUp;
-    ptr_R_ShowFiles = Rstd_ShowFiles;
-    ptr_R_ChooseFile = Rstd_ChooseFile;
-    ptr_R_loadhistory = Rstd_loadhistory;
-    ptr_R_savehistory = Rstd_savehistory;
-    ptr_R_addhistory = Rstd_addhistory;
-    ptr_R_EditFile = NULL; /* for future expansion */
-    R_timeout_handler = NULL;
-    R_timeout_val = 0;
+  ptr_R_Suicide = Rstd_Suicide;
+  ptr_R_ShowMessage = Rstd_ShowMessage;
+  ptr_R_ReadConsole = Rstd_ReadConsole;
+  ptr_R_WriteConsole = Rstd_WriteConsole;
+  ptr_R_ResetConsole = Rstd_ResetConsole;
+  ptr_R_FlushConsole = Rstd_FlushConsole;
+  ptr_R_ClearerrConsole = Rstd_ClearerrConsole;
+  ptr_R_Busy = Rstd_Busy;
+  ptr_R_CleanUp = Rstd_CleanUp;
+  ptr_R_ShowFiles = Rstd_ShowFiles;
+  ptr_R_ChooseFile = Rstd_ChooseFile;
+  ptr_R_loadhistory = Rstd_loadhistory;
+  ptr_R_savehistory = Rstd_savehistory;
+  ptr_R_addhistory = Rstd_addhistory;
+  ptr_R_EditFile = NULL; /* for future expansion */
+  R_timeout_handler = NULL;
+  R_timeout_val = 0;
+  R_GlobalContext = NULL; /* Make R_Suicide less messy... */
 
-    R_GlobalContext = NULL; /* Make R_Suicide less messy... */
+  if ((R_Home = R_HomeDir()) == NULL)
+    R_Suicide("R home directory is not defined");
+	
+  BindDomain(R_Home);
+  process_system_Renviron();
+  R_setStartTime();
+  R_DefParamsEx(Rp, RSTART_VERSION);
+	
+  /* Store the command line arguments before they are processed
+     by the R option handler.
+   */
+  R_set_command_line_arguments(ac, av);
+  cmdlines[0] = '\0';
 
-    if((R_Home = R_HomeDir()) == NULL)
-	R_Suicide("R home directory is not defined");
-    BindDomain(R_Home);
-
-    process_system_Renviron();
-
-    R_setStartTime();
-    R_DefParamsEx(Rp, RSTART_VERSION);
-    /* Store the command line arguments before they are processed
-       by the R option handler.
-     */
-    R_set_command_line_arguments(ac, av);
-    cmdlines[0] = '\0';
-
-    /* first task is to select the GUI.
-       If run from the shell script, only Tk|tk|X11|x11 are allowed.
-     */
-    for(i = 0, avv = av; i < ac; i++, avv++) {
-	if (!strcmp(*avv, "--args"))
-	    break;
-	if(!strncmp(*avv, "--gui", 5) || !strncmp(*avv, "-g", 2)) {
-	    if(!strncmp(*avv, "--gui", 5) && strlen(*avv) >= 7)
-		p = &(*avv)[6];
-	    else {
-		if(i+1 < ac) {
-		    avv++; p = *avv; ioff++;
-		} else {
-		    snprintf(msg, 1024,
-			    _("WARNING: --gui or -g without value ignored"));
-		    R_ShowMessage(msg);
-		    p = "X11";
-		}
-	    }
-	    if(!strcmp(p, "none"))
-		useX11 = FALSE; // not allowed from R.sh
+  /* first task is to select the GUI.
+     If run from the shell script, only Tk|tk|X11|x11 are allowed.
+   */
+  for(i = 0, avv = av; i < ac; i++, avv++) {
+	  
+    if (!strcmp(*avv, "--args"))
+      break;
+	  
+    if (!strncmp(*avv, "--gui", 5) || !strncmp(*avv, "-g", 2)) {
+	    
+      if (!strncmp(*avv, "--gui", 5) && strlen(*avv) >= 7)
+        p = &(*avv)[6];
+      else {
+        if (i+1 < ac) {
+          avv++; p = *avv; ioff++;
+        } else {
+          snprintf(msg, 1024,
+            _("WARNING: --gui or -g without value ignored"));
+	    R_ShowMessage(msg);
+          p = "X11";
+        }
+      }
+	    
+      if (!strcmp(p, "none"))
+        useX11 = FALSE; // not allowed from R.sh
 #ifdef HAVE_AQUA
-	    else if(!strcmp(p, "aqua"))
-		useaqua = TRUE; // not allowed from R.sh but used by R.app
+      else if (!strcmp(p, "aqua"))
+        useaqua = TRUE; // not allowed from R.sh but used by R.app
 #endif
-	    else if(!strcmp(p, "X11") || !strcmp(p, "x11"))
-		useX11 = TRUE;
-	    else if(!strcmp(p, "Tk") || !strcmp(p, "tk"))
-		useTk = TRUE;
-	    else {
+      else if (!strcmp(p, "X11") || !strcmp(p, "x11"))
+        useX11 = TRUE;
+      else if(!strcmp(p, "Tk") || !strcmp(p, "tk"))
+        useTk = TRUE;
+      else {
 #ifdef HAVE_X11
-		snprintf(msg, 1024,
-			 _("WARNING: unknown gui '%s', using X11\n"), p);
+        snprintf(msg, 1024,
+          _("WARNING: unknown gui '%s', using X11\n"), p);
 #else
-		snprintf(msg, 1024,
-			 _("WARNING: unknown gui '%s', using none\n"), p);
+        snprintf(msg, 1024,
+          _("WARNING: unknown gui '%s', using none\n"), p);
 #endif
-		R_ShowMessage(msg);
-	    }
-	    /* now remove it/them */
-	    for(j = i; j < ac - ioff; j++)
-		av[j] = av[j + ioff];
-	    ac -= ioff;
-	    break;
-	}
+        R_ShowMessage(msg);
+      }
+	    
+      /* now remove it/them */
+      for(j = i; j < ac - ioff; j++)
+        av[j] = av[j + ioff];
+	    
+      ac -= ioff;
+      break;
     }
+  }
 
 #ifdef HAVE_X11
-    if(useX11) R_GUIType = "X11";
+  if (useX11) R_GUIType = "X11";
 #endif /* HAVE_X11 */
 
 #ifdef HAVE_AQUA
-    if(useaqua) R_GUIType = "AQUA";
+  if (useaqua) R_GUIType = "AQUA";
 #endif
 
 #ifdef HAVE_TCLTK
-    if(useTk) R_GUIType = "Tk";
+  if (useTk) R_GUIType = "Tk";
 #endif
 
-    R_common_command_line(&ac, av, Rp);
-    while (--ac) {
-	if (**++av == '-') {
-	    if(!strcmp(*av, "--no-readline")) {
-		UsingReadline = FALSE;
-	    } else if(!strcmp(*av, "-f")) {
-		ac--; av++;
-#define R_INIT_TREAT_F(_AV_)						\
-		Rp->R_Interactive = FALSE;				\
-		if(strcmp(_AV_, "-")) {					\
-		    if(strlen(_AV_) >= R_PATH_MAX) {			\
-			snprintf(msg, 1024,				\
-				 _("path given in -f/--file is too long"));	\
-			R_Suicide(msg);					\
-		    }							\
-		    char path[R_PATH_MAX], *p = path;			\
-		    p = unescape_arg(p, _AV_);				\
-		    *p = '\0';						\
-		    ifp = R_fopen(path, "r");				\
-		    if(!ifp) {						\
-			snprintf(msg, 1024,				\
-				 _("cannot open file '%s': %s"),	\
-				 path, strerror(errno));		\
-			R_Suicide(msg);					\
-		    }							\
-		}
-		R_INIT_TREAT_F(*av);
-
-	    } else if(!strncmp(*av, "--file=", 7)) {
-
-		R_INIT_TREAT_F((*av)+7);
-
-	    } else if(!strcmp(*av, "-e")) {
-		ac--; av++;
-		Rp->R_Interactive = FALSE;
-		if(strlen(cmdlines) + strlen(*av) + 2 <= 10000) {
-		    char *p = cmdlines+strlen(cmdlines);
-		    p = unescape_arg(p, *av);
-		    *p++ = '\n'; *p = '\0';
-		} else {
-		    snprintf(msg, 1024, _("WARNING: '-e %s' omitted as input is too long\n"), *av);
-		    R_ShowMessage(msg);
-		}
-	    } else if(!strcmp(*av, "--args")) {
-		break;
-	    } else if(!strcmp(*av, "--interactive")) {
-		force_interactive = TRUE;
-		break;
-	    } else {
+  R_common_command_line(&ac, av, Rp);
+	
+  while (--ac) {
+	  
+    if (**++av == '-') {
+	    
+      if (!strcmp(*av, "--no-readline")) {
+        UsingReadline = FALSE;
+      } else if (!strcmp(*av, "-f")) {
+        ac--; av++;
+#define R_INIT_TREAT_F(_AV_)					\
+        Rp->R_Interactive = FALSE;				\
+        if (strcmp(_AV_, "-")) {				\
+	  if (strlen(_AV_) >= R_PATH_MAX) {			\
+            snprintf(msg, 1024,					\
+              _("path given in -f/--file is too long"));	\
+            R_Suicide(msg);					\
+          }							\
+          char path[R_PATH_MAX], *p = path;			\
+          p = unescape_arg(p, _AV_);				\
+          *p = '\0';						\
+          ifp = R_fopen(path, "r");				\
+          if (!ifp) {						\
+            snprintf(msg, 1024,					\
+              _("cannot open file '%s': %s"),			\
+              path, strerror(errno));				\
+            R_Suicide(msg);					\
+          }							\
+        }
+        R_INIT_TREAT_F(*av);
+	      
+      } else if (!strncmp(*av, "--file=", 7)) {
+        R_INIT_TREAT_F((*av)+7);
+      } else if (!strcmp(*av, "-e")) {
+	      
+        ac--; av++;
+        Rp->R_Interactive = FALSE;
+	      
+        if (strlen(cmdlines) + strlen(*av) + 2 <= 10000) {
+          char *p = cmdlines+strlen(cmdlines);
+          p = unescape_arg(p, *av);
+          *p++ = '\n'; *p = '\0';
+		
+        } else {
+		
+          snprintf(msg, 1024, _("WARNING: '-e %s' omitted as input is too long\n"), *av);
+          R_ShowMessage(msg);
+		
+        }
+      } else if (!strcmp(*av, "--args")) {
+        break;
+      } else if (!strcmp(*av, "--interactive")) {
+	      
+        force_interactive = TRUE;
+        break;
+	      
+      } else {
 #ifdef HAVE_AQUA
-		// r27492: in 2003 launching from 'Finder OSX' passed this
-		if(!strncmp(*av, "-psn", 4)) break; else
+	      
+        // r27492: in 2003 launching from 'Finder OSX' passed this
+        if (!strncmp(*av, "-psn", 4)) 
+          break; 
+		
+        else
 #endif
-		snprintf(msg, 1024, _("WARNING: unknown option '%s'\n"), *av);
-		R_ShowMessage(msg);
-	    }
-	} else {
-	    snprintf(msg, 1024, _("ARGUMENT '%s' __ignored__\n"), *av);
-	    R_ShowMessage(msg);
-	}
+          snprintf(msg, 1024, _("WARNING: unknown option '%s'\n"), *av);
+        R_ShowMessage(msg);
+      }
+    } else {
+	    
+      snprintf(msg, 1024, _("ARGUMENT '%s' __ignored__\n"), *av);
+      R_ShowMessage(msg);
+	    
     }
+  }
 
-    if(strlen(cmdlines)) { /* had at least one -e option */
-	size_t res;
-	char *tm;
-	static char ifile[R_PATH_MAX] = "\0";
-	int ifd;
+  if (strlen(cmdlines)) { /* had at least one -e option */
+	  
+    size_t res;
+    char *tm;
+    static char ifile[R_PATH_MAX] = "\0";
+    int ifd;
 
-	if(ifp) R_Suicide(_("cannot use -e with -f or --file"));    
-	/* tmpfile() does not respect TMPDIR on some systems (PR#17925).
-	   R_TempDir is not initialized, yet. */
-	tm = getenv("TMPDIR");
-	if (!R_isWriteableDir(tm)) {
-	    tm = getenv("TMP");
-	    if (!R_isWriteableDir(tm)) {
-		tm = getenv("TEMP");
-		if (!R_isWriteableDir(tm))
-		    tm = "/tmp";
-	    }
-	}
-	snprintf(ifile, R_PATH_MAX, "%s/Rscript%x.XXXXXX", tm, getpid());
-	ifd = mkstemp(ifile);
-	if (ifd >= 0) /* -1 on error, can be 0 if stdin is closed */
-	    ifp = fdopen(ifd, "w+");
-	if(!ifp) R_Suicide(_("creating temporary file for '-e' failed"));
-	unlink(ifile);
-	res = fwrite(cmdlines, strlen(cmdlines)+1, 1, ifp);
-	if(res != 1) error("fwrite error in initialize_R");
-	fflush(ifp);
-	rewind(ifp);
+    if (ifp) 
+      R_Suicide(_("cannot use -e with -f or --file"));    
+    /* tmpfile() does not respect TMPDIR on some systems (PR#17925).
+       R_TempDir is not initialized, yet. */
+    tm = getenv("TMPDIR");
+	  
+    if (!R_isWriteableDir(tm)) {
+	    
+      tm = getenv("TMP");
+      if (!R_isWriteableDir(tm)) {
+        tm = getenv("TEMP");
+        if (!R_isWriteableDir(tm))
+          tm = "/tmp";
+      }
+	    
     }
-    if (ifp && Rp->SaveAction != SA_SAVE) Rp->SaveAction = SA_NOSAVE;
-
+	  
+    snprintf(ifile, R_PATH_MAX, "%s/Rscript%x.XXXXXX", tm, getpid());
+    ifd = mkstemp(ifile);
+	  
+    if (ifd >= 0) /* -1 on error, can be 0 if stdin is closed */
+      ifp = fdopen(ifd, "w+");
+	  
+    if (!ifp) R_Suicide(_("creating temporary file for '-e' failed"));
+      unlink(ifile);
+	  
+     res = fwrite(cmdlines, strlen(cmdlines)+1, 1, ifp);
+	  
+     if (res != 1) error("fwrite error in initialize_R");
+	  
+     fflush(ifp);
+     rewind(ifp);
+	  
+  }
+	
+  if (ifp && Rp->SaveAction != SA_SAVE) Rp->SaveAction = SA_NOSAVE;
     R_SetParams(Rp);
 
-    if(!Rp->NoRenviron) {
-	process_site_Renviron();
-	process_user_Renviron();
+  if (!Rp->NoRenviron) {
+	
+    process_site_Renviron();
+    process_user_Renviron();
 
-	/* allow for R_MAX_[VN]SIZE and R_[VN]SIZE in user/site Renviron */
-	R_SizeFromEnv(Rp);
-	R_SetParams(Rp);
-    }
+    /* allow for R_MAX_[VN]SIZE and R_[VN]SIZE in user/site Renviron */
+    R_SizeFromEnv(Rp);
+    R_SetParams(Rp);
+	
+  }
 
-
-    /* On Unix the console is a file; we just use stdio to write on it */
+  /* On Unix the console is a file; we just use stdio to write on it */
+#ifdef HAVE_AQUA
+  if (useaqua)
+    R_Interactive = useaqua;
+  else
+#endif
+    R_Interactive = R_Interactive && (force_interactive || R_isatty(0));
 
 #ifdef HAVE_AQUA
-    if(useaqua)
-	R_Interactive = useaqua;
-    else
+  /* for Aqua and non-dumb terminal use callbacks instead of connections
+     and pretty-print warnings/errors (ESS = dumb terminal) */
+  if (useaqua || 
+     (R_Interactive && getenv("TERM") && strcmp(getenv("TERM"), "dumb"))) {
+    R_Outputfile = NULL;
+    R_Consolefile = NULL;
+    ptr_R_WriteConsoleEx = Rstd_WriteConsoleEx;
+    ptr_R_WriteConsole = NULL;
+  } else {
 #endif
-	R_Interactive = R_Interactive && (force_interactive || R_isatty(0));
-
+    R_Outputfile = stdout;
+    R_Consolefile = stderr;
 #ifdef HAVE_AQUA
-    /* for Aqua and non-dumb terminal use callbacks instead of connections
-       and pretty-print warnings/errors (ESS = dumb terminal) */
-    if(useaqua || 
-       (R_Interactive && getenv("TERM") && strcmp(getenv("TERM"), "dumb"))) {
-	R_Outputfile = NULL;
-	R_Consolefile = NULL;
-	ptr_R_WriteConsoleEx = Rstd_WriteConsoleEx;
-	ptr_R_WriteConsole = NULL;
-    } else {
-#endif
-	R_Outputfile = stdout;
-	R_Consolefile = stderr;
-#ifdef HAVE_AQUA
-    }
+  }
 #endif
 
+  /*
+   *  Since users' expectations for save/no-save will differ, we decided
+   *  that they should be forced to specify in the non-interactive case.
+   */
+  if (!R_Interactive && Rp->SaveAction != SA_SAVE &&
+    Rp->SaveAction != SA_NOSAVE)
+    R_Suicide(_("you must specify '--save', '--no-save' or '--vanilla'"));
 
-/*
- *  Since users' expectations for save/no-save will differ, we decided
- *  that they should be forced to specify in the non-interactive case.
- */
-    if (!R_Interactive && Rp->SaveAction != SA_SAVE &&
-	Rp->SaveAction != SA_NOSAVE)
-	R_Suicide(_("you must specify '--save', '--no-save' or '--vanilla'"));
+  R_setupHistory();
+  if (R_RestoreHistory)
+    Rstd_read_history(R_HistoryFile);
+  fpu_setup(1);
 
-    R_setupHistory();
-    if (R_RestoreHistory)
-	Rstd_read_history(R_HistoryFile);
-    fpu_setup(1);
-
-    return(0);
+  return(0);
 }
 
     /*
